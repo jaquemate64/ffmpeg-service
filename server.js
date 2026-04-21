@@ -36,6 +36,48 @@ const upload = multer({
   }
 });
 
+function cleanOldFiles(folderPath, maxAgeMs) {
+  fs.readdir(folderPath, (err, files) => {
+    if (err) {
+      console.error('Error leyendo carpeta:', folderPath, err.message);
+      return;
+    }
+
+    files.forEach((file) => {
+      const filePath = path.join(folderPath, file);
+
+      fs.stat(filePath, (statErr, stats) => {
+        if (statErr) {
+          console.error('Error leyendo archivo:', filePath, statErr.message);
+          return;
+        }
+
+        const now = Date.now();
+        const fileAge = now - stats.mtimeMs;
+
+        if (fileAge > maxAgeMs) {
+          fs.unlink(filePath, (unlinkErr) => {
+            if (unlinkErr) {
+              console.error('Error eliminando archivo:', filePath, unlinkErr.message);
+            } else {
+              console.log('Archivo eliminado por antigüedad:', filePath);
+            }
+          });
+        }
+      });
+    });
+  });
+}
+
+function runCleanup() {
+  const twoHours = 2 * 60 * 60 * 1000;
+  cleanOldFiles(uploadsDir, twoHours);
+  cleanOldFiles(outputsDir, twoHours);
+}
+
+runCleanup();
+setInterval(runCleanup, 30 * 60 * 1000);
+
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -136,7 +178,7 @@ app.get('/', (req, res) => {
             Subiendo archivo y procesando, espera por favor...
           </div>
 
-          <p class="note">No cierres esta página hasta que aparezca el enlace de descarga.</p>
+          <p class="note">Los archivos viejos se eliminan automáticamente del servidor.</p>
         </form>
       </div>
 
