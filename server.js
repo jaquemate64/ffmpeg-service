@@ -88,6 +88,19 @@ function isValidRemoteUrl(url) {
   }
 }
 
+function sanitizeBaseName(name) {
+  return String(name || '')
+    .replace(/[^\w.-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || ('file-' + Date.now());
+}
+
+function makeSafeRemoteBaseName(remoteUrl) {
+  const hash = crypto.createHash('sha1').update(remoteUrl).digest('hex').slice(0, 12);
+  return 'remote-' + Date.now() + '-' + hash;
+}
+
 function sendJobUpdate(jobId) {
   const job = jobs.get(jobId);
   if (!job || !job.clients) return;
@@ -224,7 +237,7 @@ function buildAudioOnlyArgs(req, inputPath, outputPath, outputFormat) {
 
 function buildCommand(req, inputSource, inputLabel) {
   const mode = req.body.mainMode || 'video';
-  const parsedName = path.parse(inputLabel).name || ('remote-' + Date.now());
+  const parsedName = sanitizeBaseName(path.parse(inputLabel).name || ('remote-' + Date.now()));
 
   let outputFileName = '';
   let args = [];
@@ -425,7 +438,7 @@ app.get('/', (req, res) => {
         <div id="urlSource" class="hidden">
           <label>URL del video/audio</label>
           <input type="text" id="remoteUrl" name="remoteUrl" placeholder="https://ejemplo.com/video.mp4">
-          <p class="note">La URL debe ser directa y pública.</p>
+          <p class="note">Acepta URL pública directa o link firmado de MinIO.</p>
         </div>
       </div>
 
@@ -730,6 +743,9 @@ app.get('/', (req, res) => {
     form.addEventListener('submit', function (e) {
       e.preventDefault();
 
+      errorBox.style.display = 'none';
+      errorBox.textContent = '';
+
       if (sourceType.value === 'upload') {
         if (!videoInput.files || !videoInput.files.length) {
           errorBox.style.display = 'block';
@@ -851,6 +867,8 @@ app.get('/', (req, res) => {
               eventSource.close();
             }
           };
+
+          eventSource.onerror = function () {};
         } else {
           submitBtn.disabled = false;
           submitBtn.textContent = 'Procesar archivo';
@@ -897,7 +915,20 @@ app.post('/convert', upload.single('video'), async (req, res) => {
       }
 
       inputSource = remoteUrl;
-      inputLabel = path.basename(new URL(remoteUrl).pathname) || ('remote-' + Date.now() + '.mp4');
+
+      let objectName = '';
+      try {
+        objectName = path.basename(new URL(remoteUrl).pathname || '');
+      } catch (err) {
+        objectName = '';
+      }
+
+      if (objectName && objectName.length < 100) {
+        inputLabel = sanitizeBaseName(path.parse(objectName).name) + (path.extname(objectName) || '.mp4');
+      } else {
+        inputLabel = makeSafeRemoteBaseName(remoteUrl) + '.mp4';
+      }
+
       uploadProgress = 100;
     } else {
       return res.status(400).json({ ok: false, error: 'Tipo de fuente no válido.' });
@@ -927,7 +958,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     ffmpeg.stdout.on('data', (data) => {
       stdoutBuffer += data.toString();
 
-      const lines = stdoutBuffer.split(/\\r?\\n/);
+      const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop();
 
       const job = jobs.get(jobId);
