@@ -78,6 +78,16 @@ function safeValue(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback;
 }
 
+function isValidRemoteUrl(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (err) {
+    return false;
+  }
+}
+
 function sendJobUpdate(jobId) {
   const job = jobs.get(jobId);
   if (!job || !job.clients) return;
@@ -212,10 +222,9 @@ function buildAudioOnlyArgs(req, inputPath, outputPath, outputFormat) {
   return args;
 }
 
-function buildCommand(req, file) {
+function buildCommand(req, inputSource, inputLabel) {
   const mode = req.body.mainMode || 'video';
-  const parsedName = path.parse(file.filename).name;
-  const inputPath = file.path;
+  const parsedName = path.parse(inputLabel).name || ('remote-' + Date.now());
 
   let outputFileName = '';
   let args = [];
@@ -224,12 +233,12 @@ function buildCommand(req, file) {
     const outputFormat = safeValue(req.body.audioOutputFormat, ['mp3', 'm4a', 'wav'], 'mp3');
     outputFileName = 'audio-' + parsedName + '.' + outputFormat;
     const outputPath = path.join(outputsDir, outputFileName);
-    args = buildAudioOnlyArgs(req, inputPath, outputPath, outputFormat);
+    args = buildAudioOnlyArgs(req, inputSource, outputPath, outputFormat);
   } else {
     const outputFormat = safeValue(req.body.videoOutputFormat, ['mp4', 'mkv'], 'mp4');
     outputFileName = 'video-' + parsedName + '.' + outputFormat;
     const outputPath = path.join(outputsDir, outputFileName);
-    args = buildVideoArgs(req, inputPath, outputPath, outputFormat);
+    args = buildVideoArgs(req, inputSource, outputPath, outputFormat);
   }
 
   return { args, outputFileName };
@@ -268,7 +277,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FFmpeg avanzado con progreso real</title>
+  <title>FFmpeg avanzado con URL</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -388,16 +397,37 @@ app.get('/', (req, res) => {
       text-decoration: none;
       border-radius: 8px;
     }
+    .note {
+      font-size: 13px;
+      color: #666;
+    }
   </style>
 </head>
 <body>
   <div class="box">
-    <h1>FFmpeg avanzado con barras reales</h1>
-    <p>Esta versión muestra progreso de subida y progreso de procesamiento.</p>
+    <h1>FFmpeg avanzado con archivo o URL</h1>
+    <p>Puedes subir archivo local o pegar un link directo para videos grandes.</p>
 
     <form id="uploadForm">
-      <label>Archivo</label>
-      <input type="file" id="video" name="video" accept="video/*,audio/*" required>
+      <div class="section">
+        <h3>Fuente del archivo</h3>
+        <select id="sourceType" name="sourceType">
+          <option value="upload">Subir archivo</option>
+          <option value="url">Usar URL directa</option>
+        </select>
+
+        <div id="uploadSource">
+          <label>Archivo</label>
+          <input type="file" id="video" name="video" accept="video/*,audio/*">
+          <p class="note">Úsalo para archivos de hasta 300 MB.</p>
+        </div>
+
+        <div id="urlSource" class="hidden">
+          <label>URL del video/audio</label>
+          <input type="text" id="remoteUrl" name="remoteUrl" placeholder="https://ejemplo.com/video.mp4">
+          <p class="note">La URL debe ser directa y pública.</p>
+        </div>
+      </div>
 
       <div class="section">
         <h3>Tipo de proceso</h3>
@@ -621,7 +651,7 @@ app.get('/', (req, res) => {
       <div class="status" id="statusBox"></div>
 
       <div class="progress-box" id="progressBox">
-        <div class="progress-label">Subida del archivo</div>
+        <div class="progress-label">Subida / preparación</div>
         <div class="progress-bar-bg">
           <div class="progress-bar-fill" id="uploadBar"></div>
         </div>
@@ -641,6 +671,9 @@ app.get('/', (req, res) => {
 
   <script>
     const form = document.getElementById('uploadForm');
+    const sourceType = document.getElementById('sourceType');
+    const uploadSource = document.getElementById('uploadSource');
+    const urlSource = document.getElementById('urlSource');
     const mainMode = document.getElementById('mainMode');
     const videoSection = document.getElementById('videoSection');
     const audioSection = document.getElementById('audioSection');
@@ -656,6 +689,17 @@ app.get('/', (req, res) => {
     const resultBox = document.getElementById('resultBox');
     const errorBox = document.getElementById('errorBox');
     const videoInput = document.getElementById('video');
+    const remoteUrlInput = document.getElementById('remoteUrl');
+
+    function refreshSourceType() {
+      if (sourceType.value === 'url') {
+        uploadSource.classList.add('hidden');
+        urlSource.classList.remove('hidden');
+      } else {
+        uploadSource.classList.remove('hidden');
+        urlSource.classList.add('hidden');
+      }
+    }
 
     function refreshMainMode() {
       if (mainMode.value === 'audio-only') {
@@ -675,15 +719,32 @@ app.get('/', (req, res) => {
       }
     }
 
+    sourceType.addEventListener('change', refreshSourceType);
     mainMode.addEventListener('change', refreshMainMode);
     qualityMode.addEventListener('change', refreshQualityMode);
+
+    refreshSourceType();
     refreshMainMode();
     refreshQualityMode();
 
     form.addEventListener('submit', function (e) {
       e.preventDefault();
 
-      if (!videoInput.files || !videoInput.files.length) return;
+      if (sourceType.value === 'upload') {
+        if (!videoInput.files || !videoInput.files.length) {
+          errorBox.style.display = 'block';
+          errorBox.textContent = 'Selecciona un archivo.';
+          return;
+        }
+      }
+
+      if (sourceType.value === 'url') {
+        if (!remoteUrlInput.value.trim()) {
+          errorBox.style.display = 'block';
+          errorBox.textContent = 'Ingresa una URL.';
+          return;
+        }
+      }
 
       submitBtn.disabled = true;
       submitBtn.textContent = 'Procesando...';
@@ -693,7 +754,7 @@ app.get('/', (req, res) => {
       errorBox.textContent = '';
 
       statusBox.style.display = 'block';
-      statusBox.textContent = 'Preparando subida...';
+      statusBox.textContent = 'Preparando...';
 
       progressBox.style.display = 'block';
       uploadBar.style.width = '0%';
@@ -707,14 +768,20 @@ app.get('/', (req, res) => {
 
       let eventSource = null;
 
-      xhr.upload.onprogress = function (event) {
-        if (event.lengthComputable) {
-          const percent = Math.round((event.loaded / event.total) * 100);
-          uploadBar.style.width = percent + '%';
-          uploadText.textContent = percent + '%';
-          statusBox.textContent = 'Subiendo archivo...';
-        }
-      };
+      if (sourceType.value === 'upload') {
+        xhr.upload.onprogress = function (event) {
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100);
+            uploadBar.style.width = percent + '%';
+            uploadText.textContent = percent + '%';
+            statusBox.textContent = 'Subiendo archivo...';
+          }
+        };
+      } else {
+        uploadBar.style.width = '100%';
+        uploadText.textContent = '100%';
+        statusBox.textContent = 'URL recibida. Preparando procesamiento...';
+      }
 
       xhr.onload = function () {
         if (xhr.status >= 200 && xhr.status < 300) {
@@ -739,7 +806,7 @@ app.get('/', (req, res) => {
 
           uploadBar.style.width = '100%';
           uploadText.textContent = '100%';
-          statusBox.textContent = 'Archivo subido. Iniciando procesamiento...';
+          statusBox.textContent = 'Entrada lista. Iniciando procesamiento...';
 
           eventSource = new EventSource('/events/' + response.jobId);
 
@@ -784,9 +851,6 @@ app.get('/', (req, res) => {
               eventSource.close();
             }
           };
-
-          eventSource.onerror = function () {
-          };
         } else {
           submitBtn.disabled = false;
           submitBtn.textContent = 'Procesar archivo';
@@ -812,21 +876,43 @@ app.get('/', (req, res) => {
 
 app.post('/convert', upload.single('video'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ ok: false, error: 'No se subió ningún archivo.' });
+    const sourceType = req.body.sourceType || 'upload';
+
+    let inputSource = '';
+    let inputLabel = '';
+    let uploadProgress = 100;
+
+    if (sourceType === 'upload') {
+      if (!req.file) {
+        return res.status(400).json({ ok: false, error: 'No se subió ningún archivo.' });
+      }
+      inputSource = req.file.path;
+      inputLabel = req.file.filename;
+      uploadProgress = 100;
+    } else if (sourceType === 'url') {
+      const remoteUrl = (req.body.remoteUrl || '').trim();
+
+      if (!isValidRemoteUrl(remoteUrl)) {
+        return res.status(400).json({ ok: false, error: 'La URL no es válida. Usa http:// o https://.' });
+      }
+
+      inputSource = remoteUrl;
+      inputLabel = path.basename(new URL(remoteUrl).pathname) || ('remote-' + Date.now() + '.mp4');
+      uploadProgress = 100;
+    } else {
+      return res.status(400).json({ ok: false, error: 'Tipo de fuente no válido.' });
     }
 
     const jobId = crypto.randomUUID();
-    const { args, outputFileName } = buildCommand(req, req.file);
-    const outputPath = path.join(outputsDir, outputFileName);
-    const duration = await getMediaDuration(req.file.path);
+    const { args, outputFileName } = buildCommand(req, inputSource, inputLabel);
+    const duration = await getMediaDuration(inputSource);
 
     jobs.set(jobId, {
       createdAt: Date.now(),
       status: 'processing',
-      uploadProgress: 100,
+      uploadProgress,
       processProgress: 0,
-      message: 'Archivo subido. Procesando con FFmpeg...',
+      message: sourceType === 'url' ? 'URL lista. Procesando con FFmpeg...' : 'Archivo subido. Procesando con FFmpeg...',
       downloadUrl: '',
       error: '',
       clients: []
@@ -841,7 +927,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     ffmpeg.stdout.on('data', (data) => {
       stdoutBuffer += data.toString();
 
-      const lines = stdoutBuffer.split(/\r?\n/);
+      const lines = stdoutBuffer.split(/\\r?\\n/);
       stdoutBuffer = lines.pop();
 
       const job = jobs.get(jobId);
