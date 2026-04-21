@@ -32,7 +32,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 200 * 1024 * 1024
+    fileSize: 300 * 1024 * 1024
   }
 });
 
@@ -52,7 +52,7 @@ app.get('/', (req, res) => {
           margin: 0;
         }
         .box {
-          max-width: 600px;
+          max-width: 650px;
           margin: 40px auto;
           background: white;
           padding: 30px;
@@ -66,7 +66,7 @@ app.get('/', (req, res) => {
         p {
           color: #444;
         }
-        input, button {
+        input, select, button {
           width: 100%;
           padding: 12px;
           margin-top: 12px;
@@ -119,14 +119,23 @@ app.get('/', (req, res) => {
     <body>
       <div class="box">
         <h1>Servidor FFmpeg activo</h1>
-        <p>Sube un video para convertirlo a una versión comprimida.</p>
+        <p>Sube un archivo y elige qué quieres hacer.</p>
         <form id="uploadForm" action="/convert" method="post" enctype="multipart/form-data">
-          <input type="file" id="video" name="video" accept="video/*" required>
-          <button type="submit" id="submitBtn">Subir y convertir</button>
+          <input type="file" id="video" name="video" accept="video/*,audio/*" required>
+
+          <select name="preset" id="preset" required>
+            <option value="compress">Comprimir video</option>
+            <option value="mp3">Extraer MP3</option>
+            <option value="whatsapp">Convertir para WhatsApp</option>
+          </select>
+
+          <button type="submit" id="submitBtn">Procesar archivo</button>
+
           <div class="status" id="statusBox">
             <span class="spinner"></span>
-            Subiendo archivo y procesando video, espera por favor...
+            Subiendo archivo y procesando, espera por favor...
           </div>
+
           <p class="note">No cierres esta página hasta que aparezca el enlace de descarga.</p>
         </form>
       </div>
@@ -137,7 +146,7 @@ app.get('/', (req, res) => {
         const statusBox = document.getElementById('statusBox');
         const videoInput = document.getElementById('video');
 
-        form.addEventListener('submit', function (e) {
+        form.addEventListener('submit', function () {
           if (!videoInput.files || !videoInput.files.length) {
             return;
           }
@@ -157,23 +166,59 @@ app.post('/convert', upload.single('video'), (req, res) => {
     return res.status(400).send('No se subió ningún archivo.');
   }
 
+  const preset = req.body.preset || 'compress';
   const inputPath = req.file.path;
-
   const parsedName = path.parse(req.file.filename).name;
-  const outputFileName = 'convertido-' + parsedName + '.mp4';
-  const outputPath = path.join(outputsDir, outputFileName);
 
-  const args = [
-    '-i', inputPath,
-    '-c:v', 'libx265',
-    '-crf', '35',
-    '-preset', 'ultrafast',
-    '-vf', 'scale=1280:720',
-    '-c:a', 'aac',
-    '-b:a', '48k',
-    '-y',
-    outputPath
-  ];
+  let outputFileName = '';
+  let args = [];
+
+  if (preset === 'compress') {
+    outputFileName = 'comprimido-' + parsedName + '.mp4';
+    const outputPath = path.join(outputsDir, outputFileName);
+
+    args = [
+      '-i', inputPath,
+      '-c:v', 'libx265',
+      '-crf', '35',
+      '-preset', 'ultrafast',
+      '-vf', 'scale=1280:720',
+      '-c:a', 'aac',
+      '-b:a', '48k',
+      '-y',
+      outputPath
+    ];
+  } else if (preset === 'mp3') {
+    outputFileName = 'audio-' + parsedName + '.mp3';
+    const outputPath = path.join(outputsDir, outputFileName);
+
+    args = [
+      '-i', inputPath,
+      '-vn',
+      '-c:a', 'libmp3lame',
+      '-b:a', '128k',
+      '-y',
+      outputPath
+    ];
+  } else if (preset === 'whatsapp') {
+    outputFileName = 'whatsapp-' + parsedName + '.mp4';
+    const outputPath = path.join(outputsDir, outputFileName);
+
+    args = [
+      '-i', inputPath,
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '30',
+      '-vf', 'scale=854:480',
+      '-c:a', 'aac',
+      '-b:a', '64k',
+      '-movflags', '+faststart',
+      '-y',
+      outputPath
+    ];
+  } else {
+    return res.status(400).send('Preset no válido.');
+  }
 
   const ffmpeg = spawn('ffmpeg', args);
 
@@ -187,7 +232,7 @@ app.post('/convert', upload.single('video'), (req, res) => {
   ffmpeg.on('close', (code) => {
     if (code !== 0) {
       return res.status(500).send(`
-        <h2>Error al convertir el video</h2>
+        <h2>Error al procesar el archivo</h2>
         <pre>${errorOutput}</pre>
         <p><a href="/">Volver</a></p>
       `);
@@ -199,7 +244,7 @@ app.post('/convert', upload.single('video'), (req, res) => {
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Conversión completada</title>
+        <title>Proceso completado</title>
         <style>
           body {
             font-family: Arial, sans-serif;
@@ -238,9 +283,9 @@ app.post('/convert', upload.single('video'), (req, res) => {
       </head>
       <body>
         <div class="box">
-          <h2>Conversión completada</h2>
-          <p>Tu archivo ya está listo para descargar.</p>
-          <a class="button" href="/outputs/${outputFileName}" download>Descargar archivo convertido</a>
+          <h2>Proceso completado</h2>
+          <p>Tu archivo ya está listo.</p>
+          <a class="button" href="/outputs/${outputFileName}" download>Descargar resultado</a>
           <br>
           <a class="link" href="/">Volver</a>
         </div>
