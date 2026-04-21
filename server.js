@@ -3,6 +3,7 @@ const multer = require('multer');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -13,6 +14,8 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(outputsDir)) fs.mkdirSync(outputsDir, { recursive: true });
 
 app.use('/outputs', express.static(outputsDir));
+
+const jobs = new Map();
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -59,6 +62,13 @@ function runCleanup() {
   const twoHours = 2 * 60 * 60 * 1000;
   cleanOldFiles(uploadsDir, twoHours);
   cleanOldFiles(outputsDir, twoHours);
+
+  const now = Date.now();
+  for (const [jobId, job] of jobs.entries()) {
+    if (now - job.createdAt > twoHours) {
+      jobs.delete(jobId);
+    }
+  }
 }
 
 runCleanup();
@@ -66,6 +76,50 @@ setInterval(runCleanup, 30 * 60 * 1000);
 
 function safeValue(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback;
+}
+
+function sendJobUpdate(jobId) {
+  const job = jobs.get(jobId);
+  if (!job || !job.clients) return;
+
+  const payload = JSON.stringify({
+    status: job.status,
+    uploadProgress: job.uploadProgress || 0,
+    processProgress: job.processProgress || 0,
+    message: job.message || '',
+    downloadUrl: job.downloadUrl || '',
+    error: job.error || ''
+  });
+
+  job.clients.forEach((res) => {
+    res.write(`data: ${payload}\n\n`);
+  });
+}
+
+function getMediaDuration(inputPath) {
+  return new Promise((resolve) => {
+    const args = [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      inputPath
+    ];
+
+    const ffprobe = spawn('ffprobe', args);
+    let output = '';
+
+    ffprobe.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    ffprobe.on('close', () => {
+      const duration = parseFloat(output.trim());
+      if (isNaN(duration)) return resolve(0);
+      resolve(duration);
+    });
+
+    ffprobe.on('error', () => resolve(0));
+  });
 }
 
 function buildVideoArgs(req, inputPath, outputPath, outputFormat) {
@@ -129,7 +183,10 @@ function buildVideoArgs(req, inputPath, outputPath, outputFormat) {
     args.push('-movflags', '+faststart');
   }
 
+  args.push('-progress', 'pipe:1');
+  args.push('-nostats');
   args.push('-y', outputPath);
+
   return args;
 }
 
@@ -148,7 +205,10 @@ function buildAudioOnlyArgs(req, inputPath, outputPath, outputFormat) {
     args.push('-c:a', 'libmp3lame', '-b:a', audioBitrate, '-ar', audioRate, '-ac', audioChannels);
   }
 
+  args.push('-progress', 'pipe:1');
+  args.push('-nostats');
   args.push('-y', outputPath);
+
   return args;
 }
 
@@ -175,6 +235,32 @@ function buildCommand(req, file) {
   return { args, outputFileName };
 }
 
+app.get('/events/:jobId', (req, res) => {
+  const jobId = req.params.jobId;
+  const job = jobs.get(jobId);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  if (!job) {
+    res.write(`data: ${JSON.stringify({ status: 'error', error: 'Job no encontrado.' })}\n\n`);
+    return res.end();
+  }
+
+  if (!job.clients) job.clients = [];
+  job.clients.push(res);
+
+  sendJobUpdate(jobId);
+
+  req.on('close', () => {
+    const currentJob = jobs.get(jobId);
+    if (!currentJob || !currentJob.clients) return;
+    currentJob.clients = currentJob.clients.filter((client) => client !== res);
+  });
+});
+
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -182,7 +268,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FFmpeg avanzado tamaño video/audio</title>
+  <title>FFmpeg avanzado con progreso real</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -238,6 +324,9 @@ app.get('/', (req, res) => {
       padding: 16px;
       margin-top: 16px;
     }
+    .hidden {
+      display: none;
+    }
     .status {
       margin-top: 15px;
       padding: 12px;
@@ -246,35 +335,67 @@ app.get('/', (req, res) => {
       color: #0d47a1;
       display: none;
     }
+    .progress-box {
+      margin-top: 16px;
+      display: none;
+    }
+    .progress-label {
+      font-size: 14px;
+      margin-bottom: 6px;
+      color: #333;
+    }
+    .progress-bar-bg {
+      width: 100%;
+      height: 20px;
+      background: #dfe6eb;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 6px;
+    }
+    .progress-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: #1565C0;
+      transition: width 0.2s ease;
+    }
+    .progress-text {
+      margin-bottom: 14px;
+      font-size: 14px;
+      color: #444;
+    }
     .result {
       margin-top: 20px;
+      display: none;
       padding: 16px;
       background: #f1f8e9;
       border-radius: 8px;
     }
     .error {
       margin-top: 20px;
+      display: none;
       padding: 16px;
       background: #ffebee;
       border-radius: 8px;
       color: #b71c1c;
       white-space: pre-wrap;
     }
-    .hidden {
-      display: none;
-    }
-    .note {
-      font-size: 13px;
-      color: #666;
+    .button-link {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 12px 18px;
+      background: #1565C0;
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
     }
   </style>
 </head>
 <body>
   <div class="box">
-    <h1>FFmpeg avanzado para tamaño de video y audio</h1>
-    <p>Versión estable con envío normal del formulario.</p>
+    <h1>FFmpeg avanzado con barras reales</h1>
+    <p>Esta versión muestra progreso de subida y progreso de procesamiento.</p>
 
-    <form id="uploadForm" action="/convert" method="post" enctype="multipart/form-data">
+    <form id="uploadForm">
       <label>Archivo</label>
       <input type="file" id="video" name="video" accept="video/*,audio/*" required>
 
@@ -497,11 +618,24 @@ app.get('/', (req, res) => {
 
       <button type="submit" id="submitBtn">Procesar archivo</button>
 
-      <div class="status" id="statusBox">
-        El archivo se está subiendo y procesando. Espera por favor...
+      <div class="status" id="statusBox"></div>
+
+      <div class="progress-box" id="progressBox">
+        <div class="progress-label">Subida del archivo</div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="uploadBar"></div>
+        </div>
+        <div class="progress-text" id="uploadText">0%</div>
+
+        <div class="progress-label">Procesamiento FFmpeg</div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="processBar"></div>
+        </div>
+        <div class="progress-text" id="processText">0%</div>
       </div>
 
-      <p class="note">Esta versión usa envío tradicional del formulario para mayor estabilidad.</p>
+      <div class="result" id="resultBox"></div>
+      <div class="error" id="errorBox"></div>
     </form>
   </div>
 
@@ -514,6 +648,13 @@ app.get('/', (req, res) => {
     const bitrateSection = document.getElementById('bitrateSection');
     const submitBtn = document.getElementById('submitBtn');
     const statusBox = document.getElementById('statusBox');
+    const progressBox = document.getElementById('progressBox');
+    const uploadBar = document.getElementById('uploadBar');
+    const uploadText = document.getElementById('uploadText');
+    const processBar = document.getElementById('processBar');
+    const processText = document.getElementById('processText');
+    const resultBox = document.getElementById('resultBox');
+    const errorBox = document.getElementById('errorBox');
     const videoInput = document.getElementById('video');
 
     function refreshMainMode() {
@@ -536,18 +677,132 @@ app.get('/', (req, res) => {
 
     mainMode.addEventListener('change', refreshMainMode);
     qualityMode.addEventListener('change', refreshQualityMode);
-
     refreshMainMode();
     refreshQualityMode();
 
-    form.addEventListener('submit', function () {
-      if (!videoInput.files || !videoInput.files.length) {
-        return;
-      }
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      if (!videoInput.files || !videoInput.files.length) return;
 
       submitBtn.disabled = true;
       submitBtn.textContent = 'Procesando...';
+      resultBox.style.display = 'none';
+      errorBox.style.display = 'none';
+      resultBox.innerHTML = '';
+      errorBox.textContent = '';
+
       statusBox.style.display = 'block';
+      statusBox.textContent = 'Preparando subida...';
+
+      progressBox.style.display = 'block';
+      uploadBar.style.width = '0%';
+      uploadText.textContent = '0%';
+      processBar.style.width = '0%';
+      processText.textContent = '0%';
+
+      const formData = new FormData(form);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/convert', true);
+
+      let eventSource = null;
+
+      xhr.upload.onprogress = function (event) {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          uploadBar.style.width = percent + '%';
+          uploadText.textContent = percent + '%';
+          statusBox.textContent = 'Subiendo archivo...';
+        }
+      };
+
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          let response;
+          try {
+            response = JSON.parse(xhr.responseText);
+          } catch (err) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Procesar archivo';
+            errorBox.style.display = 'block';
+            errorBox.textContent = 'Respuesta inválida del servidor.';
+            return;
+          }
+
+          if (!response.ok || !response.jobId) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Procesar archivo';
+            errorBox.style.display = 'block';
+            errorBox.textContent = response.error || 'No se pudo iniciar el proceso.';
+            return;
+          }
+
+          uploadBar.style.width = '100%';
+          uploadText.textContent = '100%';
+          statusBox.textContent = 'Archivo subido. Iniciando procesamiento...';
+
+          eventSource = new EventSource('/events/' + response.jobId);
+
+          eventSource.onmessage = function (event) {
+            let data;
+            try {
+              data = JSON.parse(event.data);
+            } catch (e) {
+              return;
+            }
+
+            if (typeof data.uploadProgress === 'number') {
+              uploadBar.style.width = data.uploadProgress + '%';
+              uploadText.textContent = data.uploadProgress + '%';
+            }
+
+            if (typeof data.processProgress === 'number') {
+              processBar.style.width = data.processProgress + '%';
+              processText.textContent = data.processProgress + '%';
+            }
+
+            if (data.message) {
+              statusBox.textContent = data.message;
+            }
+
+            if (data.status === 'completed') {
+              processBar.style.width = '100%';
+              processText.textContent = '100%';
+              statusBox.textContent = 'Proceso completado';
+              resultBox.style.display = 'block';
+              resultBox.innerHTML = '<strong>Proceso completado.</strong><br><a class="button-link" href="' + data.downloadUrl + '" download>Descargar resultado</a>';
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Procesar archivo';
+              eventSource.close();
+            }
+
+            if (data.status === 'error') {
+              errorBox.style.display = 'block';
+              errorBox.textContent = data.error || 'Ocurrió un error.';
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Procesar archivo';
+              eventSource.close();
+            }
+          };
+
+          eventSource.onerror = function () {
+          };
+        } else {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Procesar archivo';
+          errorBox.style.display = 'block';
+          errorBox.textContent = 'Error HTTP ' + xhr.status + ': ' + xhr.responseText;
+        }
+      };
+
+      xhr.onerror = function () {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Procesar archivo';
+        errorBox.style.display = 'block';
+        errorBox.textContent = 'Error de red o conexión.';
+      };
+
+      xhr.send(formData);
     });
   </script>
 </body>
@@ -555,21 +810,66 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.post('/convert', upload.single('video'), (req, res) => {
+app.post('/convert', upload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).send(`
-        <div style="font-family:Arial;padding:30px;">
-          <h2>Error</h2>
-          <p>No se subió ningún archivo.</p>
-          <p><a href="/">Volver</a></p>
-        </div>
-      `);
+      return res.status(400).json({ ok: false, error: 'No se subió ningún archivo.' });
     }
 
+    const jobId = crypto.randomUUID();
     const { args, outputFileName } = buildCommand(req, req.file);
+    const outputPath = path.join(outputsDir, outputFileName);
+    const duration = await getMediaDuration(req.file.path);
+
+    jobs.set(jobId, {
+      createdAt: Date.now(),
+      status: 'processing',
+      uploadProgress: 100,
+      processProgress: 0,
+      message: 'Archivo subido. Procesando con FFmpeg...',
+      downloadUrl: '',
+      error: '',
+      clients: []
+    });
+
+    sendJobUpdate(jobId);
+
     const ffmpeg = spawn('ffmpeg', args);
     let errorOutput = '';
+    let stdoutBuffer = '';
+
+    ffmpeg.stdout.on('data', (data) => {
+      stdoutBuffer += data.toString();
+
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop();
+
+      const job = jobs.get(jobId);
+      if (!job) return;
+
+      lines.forEach((line) => {
+        const trimmed = line.trim();
+
+        if (trimmed.startsWith('out_time_ms=')) {
+          const outTimeMs = parseInt(trimmed.split('=')[1], 10);
+          if (!isNaN(outTimeMs) && duration > 0) {
+            const processedSeconds = outTimeMs / 1000000;
+            let percent = Math.round((processedSeconds / duration) * 100);
+            if (percent > 100) percent = 100;
+            if (percent < 0) percent = 0;
+
+            job.processProgress = percent;
+            job.message = 'Procesando video/audio...';
+            sendJobUpdate(jobId);
+          }
+        }
+
+        if (trimmed === 'progress=end') {
+          job.processProgress = 100;
+          sendJobUpdate(jobId);
+        }
+      });
+    });
 
     ffmpeg.stderr.on('data', (data) => {
       errorOutput += data.toString();
@@ -577,111 +877,59 @@ app.post('/convert', upload.single('video'), (req, res) => {
     });
 
     ffmpeg.on('close', (code) => {
+      const job = jobs.get(jobId);
+      if (!job) return;
+
       if (code !== 0) {
-        return res.status(500).send(`
-          <div style="font-family:Arial;padding:30px;">
-            <h2>Error al procesar el archivo</h2>
-            <pre style="white-space:pre-wrap;">${errorOutput || 'Error desconocido.'}</pre>
-            <p><a href="/">Volver</a></p>
-          </div>
-        `);
+        job.status = 'error';
+        job.error = errorOutput || 'Error al procesar el archivo.';
+        job.message = 'Error durante el proceso.';
+        sendJobUpdate(jobId);
+        return;
       }
 
-      return res.send(`
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Proceso completado</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f4f6f8;
-      padding: 40px;
-      margin: 0;
-    }
-    .box {
-      max-width: 600px;
-      margin: 40px auto;
-      background: white;
-      padding: 30px;
-      border-radius: 12px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-    }
-    h2 {
-      color: #1565C0;
-      margin-top: 0;
-    }
-    a.button {
-      display: inline-block;
-      margin-top: 12px;
-      padding: 12px 18px;
-      background: #1565C0;
-      color: white;
-      text-decoration: none;
-      border-radius: 8px;
-    }
-    a.link {
-      display: inline-block;
-      margin-top: 16px;
-      color: #1565C0;
-      text-decoration: none;
-    }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h2>Proceso completado</h2>
-    <p>Tu archivo ya está listo.</p>
-    <a class="button" href="/outputs/${outputFileName}" download>Descargar resultado</a>
-    <br>
-    <a class="link" href="/">Volver</a>
-  </div>
-</body>
-</html>
-      `);
+      job.status = 'completed';
+      job.processProgress = 100;
+      job.downloadUrl = '/outputs/' + outputFileName;
+      job.message = 'Proceso completado';
+      sendJobUpdate(jobId);
     });
 
     ffmpeg.on('error', (err) => {
-      return res.status(500).send(`
-        <div style="font-family:Arial;padding:30px;">
-          <h2>Error al ejecutar FFmpeg</h2>
-          <pre style="white-space:pre-wrap;">${err.message}</pre>
-          <p><a href="/">Volver</a></p>
-        </div>
-      `);
+      const job = jobs.get(jobId);
+      if (!job) return;
+
+      job.status = 'error';
+      job.error = err.message;
+      job.message = 'Error al ejecutar FFmpeg.';
+      sendJobUpdate(jobId);
+    });
+
+    return res.json({
+      ok: true,
+      jobId
     });
   } catch (err) {
-    return res.status(400).send(`
-      <div style="font-family:Arial;padding:30px;">
-        <h2>Error</h2>
-        <pre style="white-space:pre-wrap;">${err.message}</pre>
-        <p><a href="/">Volver</a></p>
-      </div>
-    `);
+    return res.status(400).json({
+      ok: false,
+      error: err.message
+    });
   }
 });
 
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
-    return res.status(400).send(`
-      <div style="font-family:Arial;padding:30px;">
-        <h2>Error de subida</h2>
-        <pre style="white-space:pre-wrap;">${err.message}</pre>
-        <p><a href="/">Volver</a></p>
-      </div>
-    `);
+    return res.status(400).json({
+      ok: false,
+      error: 'Error de subida: ' + err.message
+    });
   }
 
   if (err) {
-    return res.status(500).send(`
-      <div style="font-family:Arial;padding:30px;">
-        <h2>Error del servidor</h2>
-        <pre style="white-space:pre-wrap;">${err.message}</pre>
-        <p><a href="/">Volver</a></p>
-      </div>
-    `);
+    return res.status(500).json({
+      ok: false,
+      error: 'Error del servidor: ' + err.message
+    });
   }
 
   next();
