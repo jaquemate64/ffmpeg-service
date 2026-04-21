@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -29,7 +29,12 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage: storage });
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 200 * 1024 * 1024
+  }
+});
 
 app.get('/', (req, res) => {
   res.send(`
@@ -103,14 +108,32 @@ app.post('/convert', upload.single('video'), (req, res) => {
   const outputFileName = 'convertido-' + req.file.filename + '.mp4';
   const outputPath = path.join(outputsDir, outputFileName);
 
-  const command = 'ffmpeg -i "' + inputPath + '" -c:v libx265 -crf 35 -preset ultrafast -vf scale=1280:720 -c:a aac -b:a 48k "' + outputPath + '" -y';
+  const args = [
+    '-i', inputPath,
+    '-c:v', 'libx265',
+    '-crf', '35',
+    '-preset', 'ultrafast',
+    '-vf', 'scale=1280:720',
+    '-c:a', 'aac',
+    '-b:a', '48k',
+    '-y',
+    outputPath
+  ];
 
-  exec(command, (error, stdout, stderr) => {
-    if (error) {
-      console.error(stderr);
+  const ffmpeg = spawn('ffmpeg', args);
+
+  let errorOutput = '';
+
+  ffmpeg.stderr.on('data', (data) => {
+    errorOutput += data.toString();
+    console.log(data.toString());
+  });
+
+  ffmpeg.on('close', (code) => {
+    if (code !== 0) {
       return res.status(500).send(`
         <h2>Error al convertir el video</h2>
-        <pre>${stderr}</pre>
+        <pre>${errorOutput}</pre>
         <p><a href="/">Volver</a></p>
       `);
     }
@@ -121,6 +144,26 @@ app.post('/convert', upload.single('video'), (req, res) => {
       <p><a href="/">Volver</a></p>
     `);
   });
+
+  ffmpeg.on('error', (err) => {
+    return res.status(500).send(`
+      <h2>Error al ejecutar FFmpeg</h2>
+      <pre>${err.message}</pre>
+      <p><a href="/">Volver</a></p>
+    `);
+  });
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).send('Error de subida: ' + err.message);
+  }
+
+  if (err) {
+    return res.status(500).send('Error del servidor: ' + err.message);
+  }
+
+  next();
 });
 
 const PORT = process.env.PORT || 80;
