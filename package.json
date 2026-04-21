@@ -1,12 +1,13 @@
 {
   "name": "ffmpeg-service",
   "version": "1.0.0",
-  "description": "Servicio básico FFmpeg para EasyPanel",
+  "description": "Servicio web FFmpeg con subida de archivos",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
   }
 }
